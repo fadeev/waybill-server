@@ -1,0 +1,22 @@
+{
+  "name": "http.konfetka.org",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "node": "./node_modules/.bin/nodemon",
+    "db": "sudo /etc/init.d/postgresql restart",
+    "dev": "sudo /etc/init.d/postgresql restart && ./node_modules/.bin/nodemon"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.17.1",
+    "express": "^4.15.2",
+    "lodash": "^4.17.4",
+    "pg-promise": "^5.6.7"
+  },
+  "devDependencies": {
+    "nodemon": "^1.11.0"
+  }
+}
