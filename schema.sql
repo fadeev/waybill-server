@@ -16,7 +16,7 @@ create table waybill (
 
 create table product (
        product_id serial primary key,
-       name text,
+       name text not null default '',
        unit integer default 0
 );
 
