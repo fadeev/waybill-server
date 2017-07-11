@@ -88,6 +88,33 @@ app.route('/product/:id')
        .catch(error => res.status(404).send(error))
    })
 
+app.route('/sale')
+   .get((req, res) => {
+     db.one(`select * from list_sale() as "json"`)
+       .then(({json}) => res.send({data: {sale: json.array}}))
+       .catch(error => res.status(500).send(error))
+   })
+   .post((req, res) => {
+    db.one(`select * from create_sale($1) as "json"`, [req.body])
+      .then(({json}) => res.send({data: {sale: json.object, sale_item: json.array}}))
+      .catch(error => res.status(500).send(error))
+   })
+   .patch((req, res) => {
+     res.send('sale PATCH')
+   })
+
+app.route('/sale/:id')
+   .get((req, res) => {
+     db.one(`select * from show_sale($1) as "json"`, [req.params.id])
+       .then(({json}) => res.send({data: {sale: json.object, sale_item: json.array}}))
+       .catch(error => res.status(404).send(error))
+   })
+   .delete((req, res) => {
+     db.one(`select * from delete_sale($1) as "sale_id"`, [req.params.id])
+       .then(sale_id => res.send({data: {sale: sale_id}}))
+       .catch(error => res.status(404).send())
+   })
+
 app.listen(3000, () => {})
 
 module.exports = app;

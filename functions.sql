@@ -154,15 +154,42 @@ create or replace function product_sale_price (product) returns numeric as $$
   select sale_price
   from (select * from shipment natural join waybill) s
   where s.product_id = $1.product_id
-  order by s.original_date
+  order by s.original_date desc
   limit 1;
+$$ language sql stable;
+
+create or replace function product_quantity (product) returns numeric as $$
+  select sum(t.quantity) as stock_quantity
+  from (
+    select quantity
+    from (
+      select *
+      from shipment s
+      left join waybill w on s.waybill_id = w.waybill_id
+      where return is not true
+    ) t1
+    where product_id = $1.product_id
+    union
+    select -quantity
+    from (
+      select *
+      from shipment s
+      left join waybill w on s.waybill_id = w.waybill_id
+      where return is true
+    ) t1
+    where product_id = $1.product_id
+    union
+    select -quantity
+    from sale_item
+    where product_id = $1.product_id
+  ) as t;
 $$ language sql stable;
 
 create or replace function product_sale_price_waybill_id (product) returns integer as $$
   select waybill_id
   from (select * from shipment natural join waybill) s
   where s.product_id = $1.product_id
-  order by s.original_date
+  order by s.original_date asc
   limit 1;
 $$ language sql stable;
 
@@ -177,6 +204,7 @@ begin
       p.product_id,
       p.name,
       p.unit,
+      p.product_quantity stock_quantity,
       p.product_sale_price sale_price,
       p.product_sale_price_waybill_id waybill_id
     from product p
@@ -232,3 +260,101 @@ create or replace function list_shipment (in id integer) returns setof shipment 
   select * from shipment where waybill_id = id;
 $$ language sql stable;
 
+----------------------------------------------------------------------
+-----------SALE-------------------------------------------------------
+----------------------------------------------------------------------
+
+create or replace function list_sale () returns json as $$
+declare
+  s json;
+begin
+  s := json_agg(t) from (
+    -- select mm, array_agg(t1) from (
+      with sale_list as (
+        select sale_id, sum(quantity*sale_price)
+        from sale_item
+        group by sale_id
+      )
+      select
+        yyyymmdd,
+        to_char(yyyymmdd::date, 'MM') mm,
+        to_char(yyyymmdd::date, 'TMMonth') tmm,
+        to_char(yyyymmdd::date, 'DD') dd,
+        sum(sum)
+      from (
+        select
+          to_char(created_at, 'YYYY-MM-DD') yyyymmdd,
+          sum
+          -- s.sale_id,
+          -- to_char(created_at, 'MM:TMMonth') mm,
+          -- extract(day from created_at) dd,
+          -- sum,
+          -- created_at
+        from sale s
+        join sale_list sl
+        on s.sale_id = sl.sale_id
+      ) t1
+      group by yyyymmdd
+    -- ) t1
+    -- group by mm
+  ) t;
+  return json_build_object('array', s);
+  -- s := json_agg(t) from (
+  --   with days as (
+  --     select ddmm, sum(total), month
+  --     from (
+  --       select
+  --         extract(day from created_at) as day,
+  --         extract(month from created_at) as month,
+  --         to_char(created_at, 'DD, TMMonth') ddmm,
+  --         s.sale_id,
+  --         (quantity*sale_price) total
+  --       from sale s
+  --       left join sale_item si on s.sale_id = si.sale_id
+  --     ) t1
+  --     group by ddmm, month
+  --   )
+  --   select month, json_agg(days.*) from days group by month
+  -- ) t;
+  -- return s;
+
+
+  --return json_build_object('array', s);
+  -- s := json_agg(t) from (
+  --   with totals as (
+  --     select
+  --       sale_id,
+  --       sum(quantity * sale_price)
+  --     from sale_item
+  --     group by sale_id
+  --     order by sale_id 
+  --   )
+  --   select
+  --     *,
+  --     to_char(created_at, 'DD, TMMonth') created_at_day_month
+  --   from sale s
+  --   left join totals t on s.sale_id = t.sale_id
+  --   order by s.sale_id desc
+  -- ) t;
+  -- return json_build_object('array', s);
+end; $$ language plpgsql stable;
+
+create or replace function create_sale (in input json) returns json as $$
+declare
+  si sale_item[];
+  id integer;
+  sie sale_item;
+  sale_item json;
+begin
+  si := array(select json_populate_recordset(null::sale_item, input->'sale_item'));
+  insert into sale default values returning sale_id into id;
+  foreach sie in array si loop
+    insert into sale_item
+    (sale_id, product_id, quantity, sale_price) values
+    (id, sie.product_id, sie.quantity, sie.sale_price);
+  end loop;
+  sale_item := json_agg(t) from (
+    select * from sale_item where sale_id = id
+  ) t;
+  return json_build_object('array', sale_item);
+end; $$ language plpgsql volatile;
