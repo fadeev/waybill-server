@@ -2,7 +2,7 @@
 -----------WAYBILL----------------------------------------------------
 ----------------------------------------------------------------------
 
-create or replace function list_waybill () returns json as $$
+create or replace function list_waybill (in input json) returns json as $$
 declare
   w json;
 begin
@@ -10,6 +10,10 @@ begin
     with sh as (
       select waybill_id, sum(cost_total) cost_total
       from shipment
+      group by waybill_id
+    ), payment as (
+      select waybill_id, sum(amount) payment_amount
+      from payment
       group by waybill_id
     )
     select
@@ -19,19 +23,22 @@ begin
       to_char(w.original_date, 'DD, TMMonth') original_date_day_month,
       w.return,
       sh.cost_total,
-      su.name
+      su.name,
+      payment.payment_amount
     from waybill w
     left join sh on w.waybill_id = sh.waybill_id
+    left join payment on w.waybill_id = payment.waybill_id
     left join supplier su on w.supplier_id = su.supplier_id
     order by w.waybill_id desc
   ) t;
-  return json_build_object('array', w);
+  return json_build_object('waybill', w);
 end; $$ language plpgsql stable;
 
 create or replace function show_waybill (id integer) returns json as $$
 declare
   waybill json;
   shipment json;
+  payment json;
 begin
   waybill := to_json(t) from (
     select *, (select name from supplier where supplier_id = waybill.supplier_id) as supplier_name
@@ -43,8 +50,11 @@ begin
     join product p on s.product_id = p.product_id
     where waybill_id = id
   ) t;
+  payment := json_agg(t) from (
+    select * from payment where waybill_id = id
+  ) t;
   if waybill is null then raise exception 'Not found'; end if;
-  return json_build_object('object', waybill, 'array', shipment);
+  return json_build_object('waybill', waybill, 'shipment', shipment, 'payment', payment);
 end; $$ language plpgsql  stable;
 
 create or replace function create_waybill (in input json) returns json as $$
@@ -114,7 +124,7 @@ declare
 begin
   query := coalesce(input::json->>'search', '');
   supplier := json_agg(t) from (select * from supplier where name ~* query) t;
-  return json_build_object('array', supplier);
+  return json_build_object('supplier', supplier);
 end; $$ language plpgsql stable;
 
 create or replace function show_supplier (id integer) returns json as $$
@@ -123,7 +133,7 @@ declare
 begin
   supplier := to_json(t) from (select * from supplier where supplier_id = id) t;
   if supplier is null then raise exception 'Not found'; end if;
-  return json_build_object('object', supplier);
+  return json_build_object('supplier', supplier);
 end; $$ language plpgsql  stable;
 
 create or replace function create_supplier (input json) returns json as $$
@@ -151,39 +161,52 @@ end; $$ language plpgsql volatile;
 ----------------------------------------------------------------------
 
 create or replace function product_sale_price (product) returns numeric as $$
-  select sale_price
-  from (select * from shipment natural join waybill) s
-  where s.product_id = $1.product_id
-  order by s.original_date desc
+  select sale_price from (
+    select sale_price, s.original_date as date
+    from (select * from shipment natural join waybill) s
+    where s.product_id = $1.product_id
+    union
+    select sale_price, created_at as date
+    from inventory
+    where product_id = $1.product_id
+  ) t
+  order by date desc
   limit 1;
 $$ language sql stable;
 
 create or replace function product_quantity (product) returns numeric as $$
-  select sum(t.quantity) as stock_quantity
-  from (
-    select quantity
-    from (
-      select *
-      from shipment s
-      left join waybill w on s.waybill_id = w.waybill_id
-      where return is not true
-    ) t1
-    where product_id = $1.product_id
-    union
-    select -quantity
-    from (
-      select *
-      from shipment s
-      left join waybill w on s.waybill_id = w.waybill_id
-      where return is true
-    ) t1
-    where product_id = $1.product_id
-    union
-    select -quantity
-    from sale_item
-    where product_id = $1.product_id
-  ) as t;
-$$ language sql stable;
+declare
+  quant numeric;
+  inv inventory;
+  invent numeric default 0;
+  incoming numeric default 0;
+  outgoing numeric default 0;
+  sales numeric default 0;
+begin
+  select * from inventory where product_id = $1.product_id order by created_at desc limit 1 into inv;
+
+  select sum(s.quantity)
+  from shipment s
+  left join waybill w on s.waybill_id = w.waybill_id
+  where return is not true
+  and product_id = $1.product_id
+  and original_date > coalesce(inv.created_at, '0001-01-01') into incoming;
+
+  select sum(s.quantity)
+  from shipment s
+  left join waybill w on s.waybill_id = w.waybill_id
+  where return is true
+  and product_id = $1.product_id
+  and original_date > coalesce(inv.created_at, '0001-01-01') into outgoing;
+
+  select sum(quantity)
+  from sale_item
+  left join sale on sale.sale_id = sale_item.sale_id
+  where product_id = $1.product_id
+  and created_at > coalesce(inv.created_at, '0001-01-01') into sales;
+
+  return coalesce(inv.quantity, 0) + coalesce(incoming, 0) - coalesce(outgoing, 0) - coalesce(sales, 0);
+end; $$ language plpgsql stable;
 
 create or replace function product_sale_price_waybill_id (product) returns integer as $$
   select waybill_id
@@ -211,7 +234,7 @@ begin
     where name ~* query
     order by product_id
   ) t;
-  return json_build_object('array', product);
+  return json_build_object('product', product);
 end; $$ language plpgsql stable;
 
 create or replace function show_product (id integer) returns json as $$
@@ -220,7 +243,7 @@ declare
 begin
   product := to_json(t) from (select * from product where product_id = id) t;
   if product is null then raise exception 'Not found'; end if;
-  return json_build_object('object', product);
+  return json_build_object('product', product);
 end; $$ language plpgsql stable;
 
 create or replace function create_product (input json) returns json as $$
@@ -264,79 +287,33 @@ $$ language sql stable;
 -----------SALE-------------------------------------------------------
 ----------------------------------------------------------------------
 
-create or replace function list_sale () returns json as $$
+create or replace function list_sale (in input json) returns json as $$
 declare
   s json;
 begin
   s := json_agg(t) from (
-    -- select mm, array_agg(t1) from (
-      with sale_list as (
-        select sale_id, sum(quantity*sale_price)
-        from sale_item
-        group by sale_id
-      )
+    with sale_list as (
+      select sale_id, sum(quantity*sale_price)
+      from sale_item
+      group by sale_id
+    )
+    select
+      yyyymmdd,
+      to_char(yyyymmdd::date, 'MM') mm,
+      to_char(yyyymmdd::date, 'TMMonth') tmm,
+      to_char(yyyymmdd::date, 'DD') dd,
+      sum(sum)
+    from (
       select
-        yyyymmdd,
-        to_char(yyyymmdd::date, 'MM') mm,
-        to_char(yyyymmdd::date, 'TMMonth') tmm,
-        to_char(yyyymmdd::date, 'DD') dd,
-        sum(sum)
-      from (
-        select
-          to_char(created_at, 'YYYY-MM-DD') yyyymmdd,
-          sum
-          -- s.sale_id,
-          -- to_char(created_at, 'MM:TMMonth') mm,
-          -- extract(day from created_at) dd,
-          -- sum,
-          -- created_at
-        from sale s
-        join sale_list sl
-        on s.sale_id = sl.sale_id
-      ) t1
-      group by yyyymmdd
-    -- ) t1
-    -- group by mm
+        to_char(created_at, 'YYYY-MM-DD') yyyymmdd,
+        sum
+      from sale s
+      join sale_list sl
+      on s.sale_id = sl.sale_id
+    ) t1
+    group by yyyymmdd
   ) t;
-  return json_build_object('array', s);
-  -- s := json_agg(t) from (
-  --   with days as (
-  --     select ddmm, sum(total), month
-  --     from (
-  --       select
-  --         extract(day from created_at) as day,
-  --         extract(month from created_at) as month,
-  --         to_char(created_at, 'DD, TMMonth') ddmm,
-  --         s.sale_id,
-  --         (quantity*sale_price) total
-  --       from sale s
-  --       left join sale_item si on s.sale_id = si.sale_id
-  --     ) t1
-  --     group by ddmm, month
-  --   )
-  --   select month, json_agg(days.*) from days group by month
-  -- ) t;
-  -- return s;
-
-
-  --return json_build_object('array', s);
-  -- s := json_agg(t) from (
-  --   with totals as (
-  --     select
-  --       sale_id,
-  --       sum(quantity * sale_price)
-  --     from sale_item
-  --     group by sale_id
-  --     order by sale_id 
-  --   )
-  --   select
-  --     *,
-  --     to_char(created_at, 'DD, TMMonth') created_at_day_month
-  --   from sale s
-  --   left join totals t on s.sale_id = t.sale_id
-  --   order by s.sale_id desc
-  -- ) t;
-  -- return json_build_object('array', s);
+  return json_build_object('sale', s);
 end; $$ language plpgsql stable;
 
 create or replace function create_sale (in input json) returns json as $$
@@ -356,5 +333,69 @@ begin
   sale_item := json_agg(t) from (
     select * from sale_item where sale_id = id
   ) t;
-  return json_build_object('array', sale_item);
+  return json_build_object('sale_item', sale_item);
+end; $$ language plpgsql volatile;
+
+----------------------------------------------------------------------
+-----------INVENTORY--------------------------------------------------
+----------------------------------------------------------------------
+
+create or replace function create_inventory (in input json) returns void as $$
+declare
+  si inventory[];
+  sie inventory;
+begin
+  si := array(select json_populate_recordset(null::inventory, input->'inventory'));
+  foreach sie in array si loop
+    insert into inventory
+    (product_id, quantity, sale_price) values
+    (sie.product_id, sie.quantity, sie.sale_price);
+  end loop;
+end; $$ language plpgsql volatile;
+
+----------------------------------------------------------------------
+-----------PAYMENT----------------------------------------------------
+----------------------------------------------------------------------
+
+create or replace function list_payment(in input json) returns json as $$
+declare
+  payment json;
+  id integer;
+begin
+  id := input->>'id';
+  payment := json_agg(t) from (
+    select * from payment where waybill_id = id
+  ) t;
+  return json_build_object('payment', payment);
+end; $$ language plpgsql stable;
+
+create or replace function delete_payment (in id integer) returns integer as $$
+declare
+  output integer;
+begin
+  delete from payment where payment.payment_id = id returning payment_id into output;
+  if not found then raise exception ''; end if;
+  return output;
+end; $$ language plpgsql volatile;
+
+create or replace function show_payment (id integer) returns json as $$
+declare
+  payment json;
+begin
+  payment := to_json(t) from (select * from payment where payment_id = id) t;
+  if payment is null then raise exception 'Not found'; end if;
+  return json_build_object('payment', payment);
+end; $$ language plpgsql stable;
+
+create or replace function create_payment (in input json) returns json as $$
+declare
+  p payment;
+  id integer;
+begin
+  p := json_populate_record(null::payment, input->'payment');
+  insert into payment
+    (waybill_id, amount, created_at, method) values
+    (p.waybill_id, p.amount, p.created_at, p.method)
+    returning payment_id into id;
+  return show_payment(id);
 end; $$ language plpgsql volatile;

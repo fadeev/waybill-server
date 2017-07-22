@@ -50,4 +50,12 @@ create table inventory (
        sale_price numeric
 );
 
+create table payment (
+       payment_id serial primary key,
+       waybill_id integer references waybill,
+       amount numeric,
+       created_at date,
+       method integer
+);
+
 commit;
